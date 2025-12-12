@@ -1,39 +1,99 @@
 import { GoogleGenAI } from "@google/genai";
 import { GenerationConfig } from "../types";
 
+const constructPrompt = (prompt: string, config: GenerationConfig): string => {
+  const parts = [];
+  
+  // Style prefix
+  if (config.style && config.style !== 'None') {
+    parts.push(`${config.style} style.`);
+  }
+
+  // The core prompt
+  parts.push(prompt);
+
+  // Photographic suffixes
+  if (config.photographic) {
+    const { lighting, camera, depth } = config.photographic;
+    if (lighting && lighting !== 'None') parts.push(`Lighting: ${lighting}.`);
+    if (camera && camera !== 'None') parts.push(`Camera Angle: ${camera}.`);
+    if (depth && depth !== 'None') parts.push(`Depth of Field: ${depth}.`);
+  }
+
+  // Consistency Instruction
+  if (config.consistencyStrength) {
+    switch (config.consistencyStrength) {
+      case 'High':
+        parts.push("IMPORTANT: Strictly preserve the identity, facial features, and visual details of the character(s) in the reference images.");
+        break;
+      case 'Medium':
+        parts.push("Maintain the general likeness and key visual traits of the character(s) in the reference images.");
+        break;
+      case 'Low':
+        parts.push("Use the reference images as loose inspiration for the character's appearance, allowing for creative variations.");
+        break;
+    }
+  }
+
+  return parts.join(' ');
+};
+
 /**
- * Generate a new image from scratch using a text prompt.
+ * Generate a new image from scratch using a text prompt and optional reference images.
  */
 export const generateImage = async (
   prompt: string,
-  config: GenerationConfig
+  config: GenerationConfig,
+  referenceImages: string[] = []
 ): Promise<string> => {
-  // Instantiate per request to ensure correct API key is used
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const modelName = config.modelTier === 'pro' 
     ? 'gemini-3-pro-image-preview' 
     : 'gemini-2.5-flash-image';
 
-  // Construct image configuration
   const imageConfig: any = {
     aspectRatio: config.aspectRatio,
   };
 
-  // Only Pro supports explicit resolution setting
   if (config.modelTier === 'pro' && config.resolution) {
     imageConfig.imageSize = config.resolution;
   }
+
+  const requestConfig: any = {
+    imageConfig,
+  };
+
+  if (config.modelTier === 'pro' && config.useGrounding) {
+    requestConfig.tools = [{ google_search: {} }];
+  }
+
+  const finalPrompt = constructPrompt(prompt, config);
+  
+  // Build request parts
+  const parts: any[] = [];
+  
+  // Add reference images if any (Blend mode)
+  referenceImages.forEach(base64 => {
+    const cleanBase64 = base64.replace(/^data:image\/(png|jpeg|webp);base64,/, "");
+    parts.push({
+      inlineData: {
+        data: cleanBase64,
+        mimeType: 'image/png'
+      }
+    });
+  });
+
+  // Add text prompt
+  parts.push({ text: finalPrompt });
 
   try {
     const response = await ai.models.generateContent({
       model: modelName,
       contents: {
-        parts: [{ text: prompt }],
+        parts,
       },
-      config: {
-        imageConfig,
-      },
+      config: requestConfig,
     });
 
     return extractImageFromResponse(response);
@@ -45,14 +105,12 @@ export const generateImage = async (
 
 /**
  * Edit an existing image using a text prompt and the image itself.
- * This ensures character consistency by using the previous frame as reference.
  */
 export const editImage = async (
   base64Image: string,
   prompt: string,
   config: GenerationConfig
 ): Promise<string> => {
-  // Instantiate per request to ensure correct API key is used
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   const modelName = config.modelTier === 'pro' 
@@ -67,8 +125,17 @@ export const editImage = async (
     imageConfig.imageSize = config.resolution;
   }
 
+  const requestConfig: any = {
+    imageConfig,
+  };
+
+  if (config.modelTier === 'pro' && config.useGrounding) {
+    requestConfig.tools = [{ google_search: {} }];
+  }
+
+  const finalPrompt = constructPrompt(prompt, config);
+
   try {
-    // Clean base64 string if it contains data URI header
     const cleanBase64 = base64Image.replace(/^data:image\/(png|jpeg|webp);base64,/, "");
 
     const response = await ai.models.generateContent({
@@ -78,17 +145,15 @@ export const editImage = async (
           {
             inlineData: {
               data: cleanBase64,
-              mimeType: 'image/png', // Gemini accepts generic image types
+              mimeType: 'image/png',
             },
           },
           {
-            text: prompt,
+            text: finalPrompt,
           },
         ],
       },
-      config: {
-        imageConfig,
-      },
+      config: requestConfig,
     });
 
     return extractImageFromResponse(response);
@@ -110,7 +175,6 @@ const extractImageFromResponse = (response: any): string => {
     }
   }
 
-  // If we only got text back (sometimes happens on error or refusal)
   const textPart = parts.find((p: any) => p.text);
   if (textPart) {
     throw new Error(`Model returned text instead of image: ${textPart.text}`);
