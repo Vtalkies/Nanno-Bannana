@@ -1,0 +1,5 @@
+{
+  "name": "CineBanana Studio",
+  "description": "A movie character creation and scene editing suite powered by Nano Banana (Gemini 2.5 Flash Image). Create consistent characters and edit scenes with natural language.",
+  "requestFramePermissions": []
+}
