@@ -3,6 +3,8 @@ import { generateImage, editImage, fileToBase64 } from './services/geminiService
 import { GeneratedAsset, Character, AppMode, GenerationConfig, ModelTier, ImageResolution, PhotographicConfig } from './types';
 import { Loading } from './components/Loading';
 import { IconWand, IconPhoto, IconTrash, IconDownload } from './components/Icons';
+import { SketchPad } from './components/SketchPad';
+import { InteractiveCamera } from './components/InteractiveCamera';
 
 // Simple Plus/User Icon for the Character Vault
 const IconUserPlus: React.FC<{ className?: string }> = ({ className }) => (
@@ -33,6 +35,18 @@ const LIGHTING_OPTIONS = ["None", "Natural", "Studio", "Dramatic", "Neon", "Gold
 const CAMERA_OPTIONS = ["None", "Wide Angle", "Telephoto", "Macro", "Drone View", "Low Angle", "Eye Level"];
 const DEPTH_OPTIONS = ["None", "Shallow (Bokeh)", "Deep Focus"];
 
+const SKETCH_PERSPECTIVES = [
+  "None",
+  "Front View",
+  "Side View",
+  "Top-Down (Aerial)",
+  "Low Angle (Worm's Eye)",
+  "High Angle",
+  "Isometric",
+  "First Person (POV)",
+  "Over-the-Shoulder"
+];
+
 export default function App() {
   // State
   const [prompt, setPrompt] = useState('');
@@ -56,7 +70,20 @@ export default function App() {
   const [resolution, setResolution] = useState<ImageResolution>('1K');
   const [useGrounding, setUseGrounding] = useState(false);
   const [style, setStyle] = useState('Cinematic');
+  const [enhancePhysics, setEnhancePhysics] = useState(true);
   
+  // Sketch State
+  const [useSketchGuide, setUseSketchGuide] = useState(false);
+  const [sketchMode, setSketchMode] = useState<'draw' | 'upload'>('draw');
+  const [sketchImage, setSketchImage] = useState<string | null>(null);
+  const [sketchPerspective, setSketchPerspective] = useState('None');
+  const [sketchCameraDescription, setSketchCameraDescription] = useState<string | null>(null);
+
+  // Edit/Scene Camera State
+  const [showEditCamera, setShowEditCamera] = useState(false);
+  const [editCameraDescription, setEditCameraDescription] = useState<string | null>(null);
+  const previewImageContainerRef = useRef<HTMLDivElement>(null);
+
   // Photographic State
   const [lighting, setLighting] = useState('None');
   const [camera, setCamera] = useState('None');
@@ -66,6 +93,7 @@ export default function App() {
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sketchUploadRef = useRef<HTMLInputElement>(null);
   const charUploadRef = useRef<HTMLInputElement>(null);
 
   // Load history & vault from local storage on mount
@@ -87,8 +115,6 @@ export default function App() {
       localStorage.setItem('cinebanana_history', JSON.stringify(history));
     } catch (e) {
       console.error("Storage limit reached (History)", e);
-      // We do not set error state here to avoid disrupting the user experience with constant alerts,
-      // but the data simply won't persist to next reload.
     }
   }, [history]);
 
@@ -115,7 +141,12 @@ export default function App() {
   };
 
   const handleGenerate = async () => {
-    if (!prompt.trim()) return;
+    // Determine the prompt to use:
+    // 1. User typed prompt
+    // 2. Or if in EDIT mode and we have an asset, use that asset's prompt (Regenerate)
+    const effectivePrompt = prompt.trim() || (mode === AppMode.EDIT && currentAsset ? currentAsset.prompt : "");
+    
+    if (!effectivePrompt) return;
     
     // API Key Check for Pro Model
     if (modelTier === 'pro') {
@@ -143,6 +174,10 @@ export default function App() {
         camera,
         depth
       };
+      
+      // Get selected character names
+      const selectedChars = characterVault.filter(c => selectedCharacterIds.includes(c.id));
+      const characterNames = selectedChars.map(c => c.name);
 
       const config: GenerationConfig = {
         aspectRatio,
@@ -151,29 +186,38 @@ export default function App() {
         useGrounding: modelTier === 'pro' ? useGrounding : false,
         consistencyStrength,
         style,
-        photographic
+        photographic,
+        characterNames,
+        enhancePhysics,
+        // Prioritize sketch camera if in creation mode with sketch active, 
+        // otherwise check edit camera if in edit mode
+        sketchImage: useSketchGuide && sketchImage ? sketchImage : undefined,
+        sketchPerspective: useSketchGuide ? sketchPerspective : undefined,
+        cameraDescription: (mode === AppMode.CREATE && useSketchGuide) 
+            ? sketchCameraDescription 
+            : (mode === AppMode.EDIT && showEditCamera) 
+                ? editCameraDescription 
+                : undefined
       };
       
       // Collect Vault References
-      const vaultRefs = characterVault
-        .filter(c => selectedCharacterIds.includes(c.id))
-        .map(c => c.base64);
+      const vaultRefs = selectedChars.map(c => c.base64);
 
       // Determine if we are creating new or editing existing
       if (mode === AppMode.EDIT && currentAsset) {
          // Editing Logic: Pass current image + prompt
-         resultBase64 = await editImage(currentAsset.base64, prompt, config);
+         resultBase64 = await editImage(currentAsset.base64, effectivePrompt, config);
       } else {
          // Creation Logic: Pass prompt + manual refs + vault refs
          const allReferences = [...referenceImages, ...vaultRefs];
-         resultBase64 = await generateImage(prompt, config, allReferences);
+         resultBase64 = await generateImage(effectivePrompt, config, allReferences);
       }
 
       const newAsset: GeneratedAsset = {
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         url: resultBase64,
         base64: resultBase64,
-        prompt: prompt,
+        prompt: effectivePrompt,
         timestamp: Date.now(),
         type: mode === AppMode.CREATE ? 'character' : 'scene'
       };
@@ -181,12 +225,17 @@ export default function App() {
       setCurrentAsset(newAsset);
       setHistory(prev => [newAsset, ...prev]);
       
+      // Reset Edit Camera after generation if successful
+      if (showEditCamera) {
+          setShowEditCamera(false);
+          setEditCameraDescription(null);
+      }
+      
       // Cleanup after generation
       if (mode === AppMode.CREATE) {
         setMode(AppMode.EDIT);
         setPrompt(""); 
         setReferenceImages([]); // Clear manual references
-        // Note: We intentionally keep selectedCharacterIds active for continuity
       } else {
         setPrompt("");
       }
@@ -209,7 +258,6 @@ export default function App() {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    // If we are already in edit mode, replace the current asset (Legacy behavior + safety)
     if (mode === AppMode.EDIT && currentAsset) {
        const file = files[0];
        try {
@@ -231,7 +279,6 @@ export default function App() {
        return;
     }
 
-    // In Create mode, we add to reference images list
     const newRefs: string[] = [];
     try {
         for (let i = 0; i < files.length; i++) {
@@ -246,23 +293,28 @@ export default function App() {
     }
   };
 
+  const handleSketchUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+          const base64 = await fileToBase64(file);
+          setSketchImage(base64);
+      } catch (e) {
+          setError("Failed to upload sketch.");
+      }
+  };
+
   const removeReferenceImage = (index: number) => {
     setReferenceImages(prev => prev.filter((_, i) => i !== index));
   };
 
   // --- Character Vault Logic ---
-
   const handleCharacterUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    // Reset input immediately to allow re-selection if cancelled or failed
     e.target.value = '';
-
-    // We need a name immediately. For simplicity in this flow, we'll prompt standard or use filename
     const name = window.prompt("Enter character name:", file.name.split('.')[0]);
     if (!name) return;
-
     try {
       const base64 = await fileToBase64(file);
       const newChar: Character = {
@@ -272,7 +324,6 @@ export default function App() {
         timestamp: Date.now()
       };
       setCharacterVault(prev => [newChar, ...prev]);
-      // Auto select newly uploaded character
       setSelectedCharacterIds(prev => [...prev, newChar.id]);
     } catch (err) {
       setError("Failed to upload character.");
@@ -290,18 +341,13 @@ export default function App() {
     setCharacterVault(prev => [newChar, ...prev]);
     setShowSaveCharModal(false);
     setNewCharName("");
-    // Switch to create mode so user can use the new character
     setMode(AppMode.CREATE);
     setSelectedCharacterIds([newChar.id]);
     setCurrentAsset(null);
   };
 
   const toggleCharacterSelection = (id: string) => {
-    setSelectedCharacterIds(prev => 
-      prev.includes(id) 
-        ? prev.filter(cid => cid !== id) 
-        : [...prev, id]
-    );
+    setSelectedCharacterIds(prev => prev.includes(id) ? prev.filter(cid => cid !== id) : [...prev, id]);
   };
 
   const deleteCharacter = (e: React.MouseEvent, id: string) => {
@@ -313,12 +359,17 @@ export default function App() {
   };
 
   // -----------------------------
-
   const handleClear = () => {
     setCurrentAsset(null);
     setMode(AppMode.CREATE);
     setPrompt("");
     setReferenceImages([]);
+    setSketchImage(null);
+    setUseSketchGuide(false);
+    setSketchPerspective('None');
+    setSketchCameraDescription(null);
+    setShowEditCamera(false);
+    setEditCameraDescription(null);
     setError(null);
   };
 
@@ -376,22 +427,106 @@ export default function App() {
                 Edit / Scene
               </button>
             </div>
-             {mode === AppMode.CREATE && (
-              <p className="text-xs text-amber-200/70 mt-2 px-1">
-                Generate new concepts. {modelTier === 'pro' && "Supports blending characters & refs."}
-              </p>
-            )}
-             {mode === AppMode.EDIT && (
-              <p className="text-xs text-indigo-300 mt-2 px-1">
-                Refine the current image or change the scene details.
-              </p>
-            )}
           </div>
+
+          {/* Sketch Guide Section - Only in Create Mode */}
+          {mode === AppMode.CREATE && (
+             <div className="bg-slate-800/20 p-4 rounded-xl border border-slate-800">
+                <div className="flex items-center justify-between mb-3">
+                   <h2 className="text-xs uppercase tracking-wider font-semibold text-slate-400">Sketch Guide</h2>
+                    <button 
+                      onClick={() => setUseSketchGuide(!useSketchGuide)}
+                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${useSketchGuide ? 'bg-amber-500' : 'bg-slate-700'}`}
+                    >
+                      <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${useSketchGuide ? 'translate-x-4.5' : 'translate-x-1'}`} />
+                    </button>
+                </div>
+                
+                {useSketchGuide && (
+                    <div className="animate-in fade-in slide-in-from-top-2 space-y-3">
+                        <div className="flex gap-1 bg-slate-900/50 p-1 rounded-lg">
+                            <button 
+                              onClick={() => setSketchMode('draw')} 
+                              className={`flex-1 text-xs py-1.5 rounded transition-all ${sketchMode === 'draw' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-white'}`}
+                            >
+                                Draw
+                            </button>
+                            <button 
+                              onClick={() => setSketchMode('upload')} 
+                              className={`flex-1 text-xs py-1.5 rounded transition-all ${sketchMode === 'upload' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-white'}`}
+                            >
+                                Upload
+                            </button>
+                        </div>
+
+                        {sketchMode === 'draw' ? (
+                            <SketchPad onChange={setSketchImage} onCameraChange={setSketchCameraDescription} />
+                        ) : (
+                            <div className="border border-dashed border-slate-700 rounded-lg p-4 text-center hover:bg-slate-800/50 transition-colors">
+                                <input 
+                                  type="file" 
+                                  ref={sketchUploadRef}
+                                  onChange={handleSketchUpload}
+                                  accept="image/*"
+                                  className="hidden" 
+                                />
+                                {sketchImage ? (
+                                    <div className="relative aspect-square w-full max-w-[200px] mx-auto group">
+                                        <img src={sketchImage} alt="Sketch" className="w-full h-full object-contain bg-white rounded-lg" />
+                                        <button 
+                                          onClick={() => setSketchImage(null)}
+                                          className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                        >
+                                            <IconTrash className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <button 
+                                      onClick={() => sketchUploadRef.current?.click()}
+                                      className="text-slate-400 text-sm flex flex-col items-center gap-2 w-full"
+                                    >
+                                        <IconPhoto className="w-8 h-8" />
+                                        <span>Click to upload sketch (on white paper)</span>
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                        
+                        {/* Legacy Dropdown - Only show if NO interactive camera active */}
+                        {!sketchCameraDescription && (
+                          <div className="mt-2 pt-2 border-t border-slate-700/50">
+                            <label className="text-[10px] uppercase font-semibold text-slate-400 mb-1.5 block">Sketch Camera Perspective</label>
+                            <select
+                              value={sketchPerspective}
+                              onChange={(e) => setSketchPerspective(e.target.value)}
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg text-xs p-2.5 outline-none focus:border-amber-500 transition-colors"
+                            >
+                              {SKETCH_PERSPECTIVES.map(p => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                          </div>
+                        )}
+
+                        <p className="text-[10px] text-slate-500 italic mt-1">
+                            {sketchCameraDescription 
+                              ? "Using Interactive Camera Viewpoint."
+                              : "AI will follow the structure of this sketch from the selected perspective."}
+                        </p>
+                    </div>
+                )}
+             </div>
+          )}
 
           {/* Character Vault Section */}
           <div className="bg-slate-800/20 p-4 rounded-xl border border-slate-800">
              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-xs uppercase tracking-wider font-semibold text-slate-400">Cast & Characters</h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xs uppercase tracking-wider font-semibold text-slate-400">Cast & Characters</h2>
+                  {selectedCharacterIds.length > 0 && (
+                    <span className="text-[10px] bg-amber-500 text-slate-900 px-1.5 rounded-full font-bold">
+                      {selectedCharacterIds.length}
+                    </span>
+                  )}
+                </div>
                 <input
                     type="file"
                     ref={charUploadRef}
@@ -469,6 +604,11 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                  {selectedCharacterIds.length > 1 && (
+                     <p className="text-[10px] text-purple-300 mt-2 italic">
+                        Tip: Generating a scene with {selectedCharacterIds.length} characters. Describe how they interact in the prompt.
+                     </p>
+                  )}
                </div>
              )}
           </div>
@@ -583,7 +723,16 @@ export default function App() {
                 <label className="text-xs font-semibold text-slate-400 block">
                   {mode === AppMode.CREATE ? "Description" : "Editing Instruction"}
                 </label>
-                {modelTier === 'pro' && <span className="text-[10px] text-purple-400">Supports text rendering</span>}
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1.5 cursor-pointer group">
+                     <div className={`w-3 h-3 rounded border flex items-center justify-center transition-colors ${enhancePhysics ? 'bg-amber-500 border-amber-500' : 'border-slate-600 bg-transparent'}`}>
+                       {enhancePhysics && <svg className="w-2 h-2 text-slate-900" viewBox="0 0 12 12" fill="currentColor"><path d="M3.5 9.5L1.5 7.5l1.4-1.4 2.1 2.1 5-5 1.4 1.4-6.4 6.4z"/></svg>}
+                     </div>
+                     <input type="checkbox" checked={enhancePhysics} onChange={(e) => setEnhancePhysics(e.target.checked)} className="hidden" />
+                     <span className={`text-[10px] transition-colors ${enhancePhysics ? 'text-amber-400' : 'text-slate-500 group-hover:text-slate-400'}`}>Enhanced Physics</span>
+                  </label>
+                  {modelTier === 'pro' && <span className="text-[10px] text-purple-400">Supports text rendering</span>}
+                </div>
               </div>
               <textarea
                 value={prompt}
@@ -644,7 +793,7 @@ export default function App() {
             
             <button
               onClick={handleGenerate}
-              disabled={loading || !prompt}
+              disabled={loading || (!prompt.trim() && !(mode === AppMode.EDIT && currentAsset))}
               className={`w-full py-3.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-all transform active:scale-95 ${
                 loading 
                 ? 'bg-slate-700 cursor-wait text-slate-400' 
@@ -658,7 +807,11 @@ export default function App() {
               ) : (
                 <>
                   <IconWand className="w-5 h-5" />
-                  <span>{mode === AppMode.CREATE ? "Generate" : "Update Scene"}</span>
+                  <span>
+                    {mode === AppMode.CREATE 
+                        ? "Generate" 
+                        : (prompt.trim() ? "Update Scene" : "Regenerate Scene")}
+                  </span>
                 </>
               )}
             </button>
@@ -755,15 +908,40 @@ export default function App() {
           {loading ? (
              <Loading message={mode === AppMode.CREATE ? "Dreaming up character..." : "Applying edits..."} />
           ) : currentAsset ? (
-            <div className="relative group max-w-full max-h-full shadow-2xl shadow-black/50">
-              <img 
-                src={currentAsset.url} 
-                alt="Generated Result" 
-                className="max-w-full max-h-[85vh] object-contain rounded-sm border-4 border-slate-900"
-              />
+            <div className="relative group max-w-full max-h-full shadow-2xl shadow-black/50" ref={previewImageContainerRef}>
+              {/* Image with Wrapper for Camera Overlay */}
+              <div className="relative inline-block">
+                  <img 
+                    src={currentAsset.url} 
+                    alt="Generated Result" 
+                    className="max-w-full max-h-[85vh] object-contain rounded-sm border-4 border-slate-900 block"
+                  />
+                  
+                  {/* Interactive Camera Overlay on Generated Image */}
+                  {showEditCamera && (
+                      <InteractiveCamera 
+                          containerRef={previewImageContainerRef} // Use wrapper ref (or self ref if wrapped tightly)
+                          onUpdate={setEditCameraDescription}
+                          onClose={() => { setShowEditCamera(false); setEditCameraDescription(null); }}
+                      />
+                  )}
+              </div>
               
               {/* Overlay Actions */}
-              <div className="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+              <div className="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-30">
+                 {/* New: Camera Toggle for Edit Mode */}
+                 {mode === AppMode.EDIT && (
+                     <button 
+                        onClick={() => setShowEditCamera(!showEditCamera)}
+                        className={`${showEditCamera ? 'bg-amber-500 text-slate-900' : 'bg-black/60 text-white hover:bg-black/80'} p-2.5 rounded-lg backdrop-blur-sm border border-white/10 font-bold transition-colors`}
+                        title="Add Interactive Camera to Scene"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+                            <path d="M10 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM3.465 14.493a1.23 1.23 0 0 0 .41 1.412A9.957 9.957 0 0 0 10 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 0 0-13.074.003Z" />
+                        </svg>
+                    </button>
+                 )}
+                 <div className="w-px h-8 bg-white/20 mx-1 self-center"></div>
                  <button 
                   onClick={() => setShowSaveCharModal(true)}
                   className="bg-amber-500/90 hover:bg-amber-500 text-slate-900 p-2.5 rounded-lg backdrop-blur-sm shadow-lg font-bold"
@@ -789,9 +967,10 @@ export default function App() {
               </div>
 
               {/* Prompt Overlay */}
-              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-6 pt-12 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-6 pt-12 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-30 pointer-events-none">
                 <p className="text-white text-sm font-medium line-clamp-2">{currentAsset.prompt}</p>
-                {currentAsset.type && <span className="text-[10px] text-slate-400 bg-slate-900/50 px-2 py-0.5 rounded uppercase">{currentAsset.type}</span>}
+                {currentAsset.type && <span className="text-[10px] text-slate-400 bg-slate-900/50 px-2 py-0.5 rounded uppercase mr-2">{currentAsset.type}</span>}
+                {editCameraDescription && <span className="text-[10px] text-amber-400 bg-slate-900/80 px-2 py-0.5 rounded uppercase font-bold border border-amber-500/50">Camera Active</span>}
               </div>
             </div>
           ) : (

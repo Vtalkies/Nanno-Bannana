@@ -31,6 +31,11 @@ export interface GenerationConfig {
   style?: string;
   photographic?: PhotographicConfig;
   consistencyStrength?: 'Low' | 'Medium' | 'High';
+  characterNames?: string[];
+  enhancePhysics?: boolean;
+  sketchImage?: string; // Base64 of the sketch
+  sketchPerspective?: string; // Legacy dropdown
+  cameraDescription?: string; // Universal interactive camera description
 }
 
 export enum AppMode {
